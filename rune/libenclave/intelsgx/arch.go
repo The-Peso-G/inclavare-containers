@@ -24,13 +24,17 @@ const (
 )
 
 const (
-	SigStructLength  = 1808
-	EinittokenLength = 304
-	ReportLength     = ReportBodyLength + 48
-	ReportBodyLength = 384
-	QuoteLength      = QuoteBodyLength + ReportBodyLength + 4
-	QuoteBodyLength  = 48
-	NonceLength      = 16
+	SigStructLength       = 1808
+	EinittokenLength      = 304
+	TargetinfoLength      = 512
+	ReportLength          = ReportBodyLength + 48
+	ReportBodyLength      = 384
+	QuoteLength           = QuoteBodyLength + ReportBodyLength + 4
+	QuoteBodyLength       = 48
+	NonceLength           = 16
+	SpidLength            = 16
+	SubscriptionKeyLength = 16
+	SgxMaxQuoteLength     = 2048
 )
 
 type SigStruct struct {
@@ -77,6 +81,18 @@ type Einittoken struct {
 	MaskedAttributesLe [16]byte `struct:"[16]byte"`
 	KeyId              [32]byte `struct:"[32]byte"`
 	Mac                [16]byte `struct:"[16]byte"`
+}
+
+type Targetinfo struct {
+	Measurement   [32]byte  `struct:"[32]byte"`
+	Attributes    [16]byte  `struct:"[16]byte"`
+	CetAttributes uint8     `struct:"uint8"`
+	_             uint8     `struct:"uint8"`
+	ConfigSvn     uint16    `struct:"uint16"`
+	MiscSelect    uint32    `struct:"uint32"`
+	_             [8]byte   `struct:"[8]byte"`
+	ConfigId      [64]byte  `struct:"[64]byte"`
+	_             [384]byte `struct:"[384]byte"`
 }
 
 type Report struct {

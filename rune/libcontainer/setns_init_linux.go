@@ -14,6 +14,7 @@ import (
 	"github.com/opencontainers/runc/libenclave"
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	"golang.org/x/sys/unix"
 )
@@ -27,6 +28,7 @@ type linuxSetnsInit struct {
 	logPipe       *os.File
 	logLevel      string
 	agentPipe     *os.File
+	detached      bool
 }
 
 func (l *linuxSetnsInit) getSessionRingName() string {
@@ -93,11 +95,24 @@ func (l *linuxSetnsInit) Init() error {
 		}
 	}
 	if l.config.Config.Enclave != nil {
-		err := libenclave.StartBootstrap(l.pipe, l.logPipe, l.logLevel, -1, l.agentPipe)
-		if err != nil {
-			return newSystemErrorWithCause(err, "libenclave bootstrap")
+		cfg := &libenclave.RuneletConfig{
+			InitPipe:  l.pipe,
+			LogPipe:   l.logPipe,
+			LogLevel:  l.logLevel,
+			FifoFd:    -1,
+			AgentPipe: l.agentPipe,
+			Detached:  l.detached,
 		}
-		return system.Execv("/proc/self/exe", []string{"runelet", "enclave"}, os.Environ())
+
+		exitCode, err := libenclave.StartInitialization(l.config.Args, cfg)
+		if err != nil {
+			logrus.Fatal(err)
+			os.Exit(1)
+		}
+		logrus.Debugf("enclave payload exit code: %d", exitCode)
+		os.Exit(int(exitCode))
+		// make compiler happy
+		return fmt.Errorf("failed to initialize runelet")
 	}
 	return system.Execv(l.config.Args[0], l.config.Args[0:], os.Environ())
 }

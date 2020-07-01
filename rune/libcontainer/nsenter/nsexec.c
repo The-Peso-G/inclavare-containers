@@ -134,7 +134,7 @@ int setns(int fd, int nstype)
 }
 #endif
 
-static void write_log_with_info(const char *level, const char *function, int line, const char *format, ...)
+void write_log_with_info(const char *level, const char *function, int line, const char *format, ...)
 {
 	char message[1024] = {};
 
@@ -569,6 +569,11 @@ void join_namespaces(char *nslist)
 /* Defined in cloned_binary.c. */
 extern int ensure_cloned_binary(void);
 
+/* Defined in loader.c. */
+extern bool enclave_configured(void);
+extern bool is_init_runelet(void);
+extern int load_enclave_runtime(void);
+
 void nsexec(void)
 {
 	int pipenum;
@@ -597,6 +602,12 @@ void nsexec(void)
 	 */
 	if (ensure_cloned_binary() < 0)
 		bail("could not ensure we are a cloned binary");
+
+	if (enclave_configured()) {
+		int ret = load_enclave_runtime();
+		if (ret < 0)
+			bail("load_enclave_runtime() failed, ret = %d", ret);
+	}
 
 	write_log(DEBUG, "nsexec started");
 
@@ -1019,6 +1030,18 @@ void nsexec(void)
 
 			/* Free netlink data. */
 			nl_free(&config);
+
+			if (enclave_configured()) {
+				const char *name;
+
+				if (is_init_runelet())
+					name = "init-runelet";
+				else
+					name = "runelet";
+
+				/* For debugging. */
+				prctl(PR_SET_NAME, (unsigned long)name, 0, 0, 0);
+			}
 
 			/* Finish executing, let the Go runtime take over. */
 			return;

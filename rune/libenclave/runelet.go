@@ -10,9 +10,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 	"io"
+	"io/ioutil"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 )
@@ -21,44 +21,24 @@ const signalBufferSize = 2048
 
 var enclaveRuntime *runtime.EnclaveRuntimeWrapper
 
-func StartInitialization() (exitCode int32, err error) {
-	logLevel := os.Getenv("_LIBENCLAVE_LOGLEVEL")
+type RuneletConfig struct {
+	InitPipe  *os.File
+	LogPipe   *os.File
+	LogLevel  string
+	FifoFd    int
+	AgentPipe *os.File
+	Detached  bool
+}
 
-	// Make the unused environment variables invisible to enclave runtime.
-	os.Unsetenv("_LIBENCLAVE_LOGPIPE")
-	os.Unsetenv("_LIBENCLAVE_LOGLEVEL")
+func StartInitialization(cmd []string, cfg *RuneletConfig) (exitCode int32, err error) {
+	logLevel := cfg.LogLevel
 
 	// Determine which type of runelet is initializing.
-	var fifoFd = -1
-	envFifoFd := os.Getenv("_LIBENCLAVE_FIFOFD")
-	if envFifoFd != "" {
-		defer func() {
-			if err != nil {
-				unstageFd("_LIBENCLAVE_FIFOFD")
-			}
-		}()
-		fifoFd, err = strconv.Atoi(envFifoFd)
-		if err != nil {
-			return 1, err
-		}
-	}
+	fifoFd := cfg.FifoFd
 
 	// Retrieve the init pipe fd to accomplish the enclave configuration
 	// handshake as soon as possible with parent rune.
-	envInitPipe := os.Getenv("_LIBENCLAVE_INITPIPE")
-	if envInitPipe == "" {
-		return 1, fmt.Errorf("unable to get _LIBENCLAVE_INITPIPE")
-	}
-	defer func() {
-		if err != nil {
-			unstageFd("_LIBENCLAVE_INITPIPE")
-		}
-	}()
-	pipeFd, err := strconv.Atoi(envInitPipe)
-	if err != nil {
-		return 1, err
-	}
-	initPipe := os.NewFile(uintptr(pipeFd), "init-pipe")
+	initPipe := cfg.InitPipe
 	defer func() {
 		if err != nil {
 			initPipe.Close()
@@ -96,10 +76,14 @@ func StartInitialization() (exitCode int32, err error) {
 		}
 	}
 
+	// If runelet run as detach mode, close logrus before initpipe closed.
+	if cfg.Detached {
+		logrus.SetOutput(ioutil.Discard)
+	}
+
 	// Close the init pipe to signal that we have completed our init.
 	// So `rune create` or the upper half part of `rune run` can return.
 	initPipe.Close()
-	os.Unsetenv("_LIBENCLAVE_INITPIPE")
 
 	// Take care the execution sequence among components. Closing exec fifo
 	// made by finalizeInitialization() allows the execution of `rune start`
@@ -107,27 +91,13 @@ func StartInitialization() (exitCode int32, err error) {
 	// and entrypoint, implying `rune exec` may preempt them too.
 
 	// Launch agent service for child runelet.
-	envAgentPipe := os.Getenv("_LIBENCLAVE_AGENTPIPE")
-	if envAgentPipe == "" {
-		return 1, fmt.Errorf("unable to get _LIBENCLAVE_AGENTPIPE")
-	}
-	defer func() {
-		if err != nil {
-			unstageFd("_LIBENCLAVE_AGENTPIPE")
-		}
-	}()
-	agentPipeFd, err := strconv.Atoi(envAgentPipe)
-	if err != nil {
-		return 1, err
-	}
-	agentPipe := os.NewFile(uintptr(agentPipeFd), "agent-pipe")
+	agentPipe := cfg.AgentPipe
 	defer agentPipe.Close()
-	os.Unsetenv("_LIBENCLAVE_AGENTPIPE")
 
 	notifySignal := make(chan os.Signal, signalBufferSize)
 
 	if fifoFd == -1 {
-		exitCode, err = remoteExec(agentPipe, config, notifySignal)
+		exitCode, err = remoteExec(agentPipe, cmd, notifySignal)
 		if err != nil {
 			return exitCode, err
 		}
@@ -143,7 +113,6 @@ func StartInitialization() (exitCode int32, err error) {
 	if err = finalizeInitialization(fifoFd); err != nil {
 		return 1, err
 	}
-	os.Unsetenv("_LIBENCLAVE_FIFOFD")
 
 	// Capture all signals and then forward to enclave runtime.
 	signal.Notify(notifySignal)
@@ -154,7 +123,7 @@ func StartInitialization() (exitCode int32, err error) {
 	// have a way to prevent from this race happening.
 	enclaveRuntime = rt
 
-	exitCode, err = rt.ExecutePayload(config.Cmd, os.Environ(),
+	exitCode, err = rt.ExecutePayload(cmd, os.Environ(),
 		[3]*os.File{
 			os.Stdin, os.Stdout, os.Stderr,
 		})
@@ -229,12 +198,13 @@ func finalizeInitialization(fifoFd int) error {
 	return nil
 }
 
-func remoteExec(agentPipe *os.File, config *configs.InitEnclaveConfig, notifySignal chan os.Signal) (exitCode int32, err error) {
-	logrus.Debugf("preparing to remote exec %s", strings.Join(config.Cmd, " "))
+func remoteExec(agentPipe *os.File, cmd []string, notifySignal chan os.Signal) (exitCode int32, err error) {
+	c := strings.Join(cmd, " ")
+	logrus.Debugf("preparing to remote exec %s", c)
 
 	req := &pb.AgentServiceRequest{}
 	req.Exec = &pb.AgentServiceRequest_Execute{
-		Argv: strings.Join(config.Cmd, " "),
+		Argv: c,
 		Envp: strings.Join(os.Environ(), " "),
 	}
 	if err = protoBufWrite(agentPipe, req); err != nil {
